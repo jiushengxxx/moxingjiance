@@ -14,7 +14,7 @@ from ui.home import Ui_MainWindow
 from UIFunctions import *
 from collections import defaultdict
 from pathlib import Path
-from utils.capnums import Camera, CameraManager
+from utils.capnums import Camera
 from utils.rtsp_win import Window
 import numpy as np
 import time
@@ -23,7 +23,6 @@ import torch
 import sys
 import cv2
 import os
-from ultralytics import YOLO
 
 
 class YoloPredictor(BasePredictor, QObject):
@@ -371,14 +370,6 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         # initialization
         self.load_config()
 
-        # 加载新训练的模型
-        self.load_trained_model()
-
-        self.camera_manager = CameraManager()  # 初始化摄像头管理器
-        self.model = YOLO("yolov8n.pt")  # 加载 YOLOv8 模型
-        self.init_camera()
-        self.connect_signals()
-
     # The main window displays the original image and detection results
     @staticmethod
     def show_image(img_src, label):
@@ -699,74 +690,6 @@ class MainWindow(QMainWindow, Ui_MainWindow):
             sys.exit(0)
         else:
             sys.exit(0)
-
-    def load_trained_model(self):
-        """加载新训练的模型"""
-        trained_model_path = './models/trained_model.pt'
-        if os.path.exists(trained_model_path):
-            self.yolo_predict.new_model_name = trained_model_path
-            self.show_status(f'加载新训练的模型: {trained_model_path}')
-            self.Model_name.setText('trained_model.pt')
-        else:
-            self.show_status('未找到新训练的模型')
-
-    def init_camera(self):
-        """初始化摄像头"""
-        available_cameras = self.camera_manager.get_available_cameras()
-        if available_cameras:
-            self.camera_manager.add_camera(available_cameras[0])
-            self.camera_manager.switch_camera(available_cameras[0])
-            self.camera_manager.cameras[available_cameras[0]].frame_ready.connect(self.process_frame)
-            self.camera_manager.cameras[available_cameras[0]].camera_status.connect(self.show_status)
-
-    def connect_signals(self):
-        """连接信号和槽"""
-        self.train_button.clicked.connect(self.start_training)  # 连接训练按钮
-        self.run_button.clicked.connect(self.start_detection)  # 连接实时识别按钮
-        self.stop_button.clicked.connect(self.stop_detection)  # 连接停止识别按钮
-
-    def process_frame(self, frame):
-        """处理视频帧并进行模型推理"""
-        # 模型推理
-        results = self.model(frame)  # 将视频帧传递给 YOLOv8 模型
-        annotated_frame = results[0].plot()  # 获取带标注的帧
-
-        # 显示结果
-        self.update_frame(annotated_frame)
-
-    def update_frame(self, frame):
-        """更新视频帧显示"""
-        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)  # 转换颜色空间
-        h, w, ch = frame.shape
-        bytes_per_line = ch * w
-        q_img = QImage(frame.data, w, h, bytes_per_line, QImage.Format_RGB888)
-        self.pre_video.setPixmap(QPixmap.fromImage(q_img))  # 显示视频帧
-
-    def start_training(self):
-        """启动模型训练"""
-        # 选择 YAML 配置文件
-        yaml_file, _ = QFileDialog.getOpenFileName(self, "选择 YAML 配置文件", "", "YAML Files (*.yaml)")
-        if not yaml_file:
-            self.show_status("未选择 YAML 配置文件")
-            return
-
-        # 启动训练
-        try:
-            self.show_status("训练启动中...")
-            self.model.train(data=yaml_file, epochs=100, imgsz=640)  # 启动训练
-            self.show_status("训练完成")
-        except Exception as e:
-            self.show_status(f"训练失败: {str(e)}")
-
-    def start_detection(self):
-        """启动实时识别"""
-        self.show_status("实时识别启动中...")
-        self.camera_manager.start_all_cameras()  # 启动所有摄像头
-
-    def stop_detection(self):
-        """停止实时识别"""
-        self.show_status("实时识别已停止")
-        self.camera_manager.stop_all_cameras()  # 停止所有摄像头
 
 
 if __name__ == "__main__":

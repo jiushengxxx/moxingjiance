@@ -19,7 +19,4 @@
     <file>img/logo.png</file>
     <file>img/RTSP.png</file>
   </qresource>
-  <qresource prefix="/icons">
-    <file>img/train_icon.png</file>
-  </qresource>
 </RCC>
