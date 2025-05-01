@@ -1,11 +1,11 @@
-from ultralytics.yolo.engine.predictor import BasePredictor
-from ultralytics.yolo.engine.results import Results
-from ultralytics.yolo.utils import DEFAULT_CFG, LOGGER, SETTINGS, callbacks, ops
-from ultralytics.yolo.utils.plotting import Annotator, colors, save_one_box
-from ultralytics.yolo.utils.torch_utils import smart_inference_mode
-from ultralytics.yolo.utils.files import increment_path
-from ultralytics.yolo.utils.checks import check_imshow
-from ultralytics.yolo.cfg import get_cfg
+from ultralytics import YOLO
+from ultralytics.engine.results import Results
+from ultralytics.utils import DEFAULT_CFG, LOGGER, SETTINGS, callbacks, ops
+from ultralytics.utils.plotting import Annotator, colors, save_one_box
+from ultralytics.utils.torch_utils import smart_inference_mode
+from ultralytics.utils.files import increment_path
+from ultralytics.utils.checks import check_imshow
+from ultralytics.cfg import get_cfg
 from PySide6.QtWidgets import QApplication, QMainWindow, QFileDialog, QMenu
 from PySide6.QtGui import QImage, QPixmap, QColor, QAction
 from PySide6.QtCore import QTimer, QThread, Signal, QObject, QPoint, Qt
@@ -23,9 +23,10 @@ import torch
 import sys
 import cv2
 import os
+from threading import Thread
 
 
-class YoloPredictor(BasePredictor, QObject):
+class YoloPredictor(QObject):
     yolo2main_pre_img = Signal(np.ndarray)   # raw image signal
     yolo2main_res_img = Signal(np.ndarray)   # test result signal
     yolo2main_status_msg = Signal(str)       # Detecting/pausing/stopping/testing complete/error reporting signal
@@ -35,10 +36,9 @@ class YoloPredictor(BasePredictor, QObject):
     yolo2main_class_num = Signal(int)        # Number of categories detected
     yolo2main_target_num = Signal(int)       # Targets detected
 
-    def __init__(self, cfg=DEFAULT_CFG, overrides=None): 
-        super(YoloPredictor, self).__init__() 
-        QObject.__init__(self)
-
+    def __init__(self, cfg=DEFAULT_CFG, overrides=None):
+        super(YoloPredictor, self).__init__()
+        self.yolo_model = None  # 替换原来的 self.model
         self.args = get_cfg(cfg, overrides)
         project = self.args.project or Path(SETTINGS['runs_dir']) / self.args.task
         name = f'{self.args.mode}'
@@ -63,7 +63,6 @@ class YoloPredictor(BasePredictor, QObject):
     
 
         # Usable if setup is done
-        self.model = None
         self.data = self.args.data  # data_dict
         self.imgsz = None
         self.device = None
@@ -85,7 +84,7 @@ class YoloPredictor(BasePredictor, QObject):
 
             # set model    
             self.yolo2main_status_msg.emit('Loding Model...')
-            if not self.model:
+            if not self.yolo_model:
                 self.setup_model(self.new_model_name)
                 self.used_model_name = self.new_model_name
 
@@ -98,7 +97,7 @@ class YoloPredictor(BasePredictor, QObject):
 
             # warmup model
             if not self.done_warmup:
-                self.model.warmup(imgsz=(1 if self.model.pt or self.model.triton else self.dataset.bs, 3, *self.imgsz))
+                self.yolo_model.warmup(imgsz=(1 if self.yolo_model.pt or self.yolo_model.triton else self.dataset.bs, 3, *self.imgsz))
                 self.done_warmup = True
 
             self.seen, self.windows, self.dt, self.batch = 0, [], (ops.Profile(), ops.Profile(), ops.Profile()), None
@@ -152,7 +151,7 @@ class YoloPredictor(BasePredictor, QObject):
                             im = im[None]  # expand for batch dim
                     # inference 
                     with self.dt[1]:
-                        preds = self.model(im, augment=self.args.augment, visualize=visualize)
+                        preds = self.yolo_model(im, augment=self.args.augment, visualize=visualize)
                     # postprocess 
                     with self.dt[2]:
                         self.results = self.postprocess(preds, im, im0s)
@@ -215,11 +214,11 @@ class YoloPredictor(BasePredictor, QObject):
 
 
     def get_annotator(self, img):
-        return Annotator(img, line_width=self.args.line_thickness, example=str(self.model.names))
+        return Annotator(img, line_width=self.args.line_thickness, example=str(self.yolo_model.names))
 
     def preprocess(self, img):
-        img = torch.from_numpy(img).to(self.model.device)
-        img = img.half() if self.model.fp16 else img.float()  # uint8 to fp16/32
+        img = torch.from_numpy(img).to(self.yolo_model.device)
+        img = img.half() if self.yolo_model.fp16 else img.float()  # uint8 to fp16/32
         img /= 255  # 0 - 255 to 0.0 - 1.0
         return img
 
@@ -239,7 +238,7 @@ class YoloPredictor(BasePredictor, QObject):
             pred[:, :4] = ops.scale_boxes(img.shape[2:], pred[:, :4], shape).round()
             path, _, _, _, _ = self.batch
             img_path = path[i] if isinstance(path, list) else path
-            results.append(Results(orig_img=orig_img, path=img_path, names=self.model.names, boxes=pred))
+            results.append(Results(orig_img=orig_img, path=img_path, names=self.yolo_model.names, boxes=pred))
         # print(results)
         return results
 
@@ -267,7 +266,7 @@ class YoloPredictor(BasePredictor, QObject):
 
         for c in det.cls.unique():
             n = (det.cls == c).sum()  # detections per class
-            log_string += f"{n}~{self.model.names[int(c)]},"   #   {'s' * (n > 1)}, "   # don't add 's'
+            log_string += f"{n}~{self.yolo_model.names[int(c)]},"   #   {'s' * (n > 1)}, "   # don't add 's'
         # now log_string is the classes 👆
 
 
@@ -281,13 +280,13 @@ class YoloPredictor(BasePredictor, QObject):
                     f.write(('%g ' * len(line)).rstrip() % line + '\n')
             if self.save_res or self.args.save_crop or self.args.show or True:  # Add bbox to image(must)
                 c = int(cls)  # integer class
-                name = f'id:{int(d.id.item())} {self.model.names[c]}' if d.id is not None else self.model.names[c]
+                name = f'id:{int(d.id.item())} {self.yolo_model.names[c]}' if d.id is not None else self.yolo_model.names[c]
                 label = None if self.args.hide_labels else (name if self.args.hide_conf else f'{name} {conf:.2f}')
                 self.annotator.box_label(d.xyxy.squeeze(), label, color=colors(c, True))
             if self.args.save_crop:
                 save_one_box(d.xyxy,
                              imc,
-                             file=self.save_dir / 'crops' / self.model.model.names[c] / f'{self.data_path.stem}.jpg',
+                             file=self.save_dir / 'crops' / self.yolo_model.model.names[c] / f'{self.data_path.stem}.jpg',
                              BGR=True)
 
         return log_string
@@ -354,7 +353,7 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         
         # Select detection source
         self.src_file_button.clicked.connect(self.open_src_file)  # select local file
-        self.src_cam_button.clicked.connect(self.chose_cam)  # 确保摄像头按钮信号已连接
+        self.src_cam_button.clicked.connect(self.toggle_camera)  # 确保摄像头按钮信号已连接
         # self.src_rtsp_button.clicked.connect(self.show_status("The function has not yet been implemented."))#chose_rtsp
 
         # start testing button
@@ -369,6 +368,14 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         
         # initialization
         self.load_config()
+        self.camera_manager = Camera()  # Initialize camera_manager
+        self.init_camera()
+
+        # 定时器用于定期读取摄像头帧
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self.update_frame)
+
+        self.is_camera_running = False  # 添加摄像头状态标志
 
     # The main window displays the original image and detection results
     @staticmethod
@@ -450,53 +457,62 @@ class MainWindow(QMainWindow, Ui_MainWindow):
             self.stop()             
 
     # Select camera source----  have one bug
-    def chose_cam(self):
+    def toggle_camera(self):
+        """切换摄像头状态"""
+        if not self.is_camera_running:
+            self.start_camera()
+        else:
+            self.stop_camera()
+            
+    def start_camera(self):
+        """启动摄像头和YOLO检测"""
         try:
-            self.stop()  # 停止当前检测任务
-            MessageBox(
-                self.close_button, title='Note', text='loading camera...', time=2000, auto=True).exec()
-            # 获取本地摄像头数量
-            _, cams = Camera().get_cam_num()
-            if not cams:
-                self.show_status('未检测到可用的摄像头，请检查设备连接。')
-                return
-            popMenu = QMenu()
-            popMenu.setFixedWidth(self.src_cam_button.width())
-            popMenu.setStyleSheet('''
-                QMenu {
-                    font-size: 16px;
-                    font-family: "Microsoft YaHei UI";
-                    font-weight: light;
-                    color: white;
-                    padding-left: 5px;
-                    padding-right: 5px;
-                    padding-top: 4px;
-                    padding-bottom: 4px;
-                    border-style: solid;
-                    border-width: 0px;
-                    border-color: rgba(255, 255, 255, 255);
-                    border-radius: 3px;
-                    background-color: rgba(200, 200, 200, 50);
-                }
-            ''')
-
-            for cam in cams:
-                action = QAction(f"摄像头 {cam}")
-                popMenu.addAction(action)
-
-            x = self.src_cam_button.mapToGlobal(self.src_cam_button.pos()).x()
-            y = self.src_cam_button.mapToGlobal(self.src_cam_button.pos()).y()
-            y = y + self.src_cam_button.frameGeometry().height()
-            pos = QPoint(x, y)
-            action = popMenu.exec(pos)
-            if action:
-                cam_index = int(action.text().split()[-1])  # 提取摄像头索引
-                self.yolo_predict.source = cam_index  # 设置摄像头源
-                self.show_status(f'正在加载摄像头：{cam_index}')
-                self.start_camera()  # 启动摄像头
-
+            if not hasattr(self, 'yolo_thread') or not self.yolo_thread.isRunning():
+                # 初始化摄像头
+                self.init_camera()
+                
+                # 启动YOLO检测线程
+                self.yolo_thread = YoloDetectionThread(model_path='yolov8n.pt')
+                self.yolo_thread.raw_frame_signal.connect(self.show_raw_frame)
+                self.yolo_thread.detected_frame_signal.connect(self.show_detected_frame)
+                self.yolo_thread.start()
+                
+                # 启动帧更新定时器
+                self.timer.start(30)
+                
+                self.is_camera_running = True
+                self.show_status('摄像头已启动')
         except Exception as e:
-            self.show_status(f'错误：{str(e)}')
+            self.show_status(f'启动摄像头失败: {str(e)}')
+            
+    def stop_camera(self):
+        """停止摄像头和YOLO检测"""
+        if hasattr(self, 'yolo_thread') and self.yolo_thread.isRunning():
+            # 停止YOLO线程
+            self.yolo_thread.stop()
+            self.yolo_thread.wait()
+            
+            # 停止定时器
+            self.timer.stop()
+            
+            # 释放摄像头资源
+            if hasattr(self.camera_manager, 'current_camera') and self.camera_manager.current_camera.isOpened():
+                self.camera_manager.current_camera.release()
+            
+            self.is_camera_running = False
+            self.show_status('摄像头已停止')
+
+    def show_raw_frame(self, qimage):
+        """显示原始帧"""
+        pixmap = QPixmap.fromImage(qimage)
+        self.pre_video.setPixmap(pixmap)
+        self.pre_video.setScaledContents(True)
+
+    def show_detected_frame(self, qimage):
+        """显示检测结果帧"""
+        pixmap = QPixmap.fromImage(qimage)
+        self.res_video.setPixmap(pixmap)
+        self.res_video.setScaledContents(True)
 
     # select network source
     def chose_rtsp(self):
@@ -682,33 +698,97 @@ class MainWindow(QMainWindow, Ui_MainWindow):
 
     # Exit Exit thread, save settings
     def closeEvent(self, event):
-        config_file = 'config/setting.json'
-        config = dict()
-        config['iou'] = self.iou_spinbox.value()
-        config['conf'] = self.conf_spinbox.value()
-        config['rate'] = self.speed_spinbox.value()
-        config['save_res'] = (0 if self.save_res_button.checkState()==Qt.Unchecked else 2)
-        config['save_txt'] = (0 if self.save_txt_button.checkState()==Qt.Unchecked else 2)
-        config_json = json.dumps(config, ensure_ascii=False, indent=2)
-        with open(config_file, 'w', encoding='utf-8') as f:
-            f.write(config_json)
+        """重写窗口关闭事件"""
+        # 停止 YOLO 检测线程
         if self.yolo_thread.isRunning():
             self.yolo_predict.stop_dtc = True
             self.yolo_thread.quit()
-            self.yolo_thread.wait()  # 等待线程结束
-            MessageBox(
-                self.close_button, title='Note', text='Exiting, please wait...', time=3000, auto=True).exec()
-        sys.exit(0)
+            self.yolo_thread.wait()
 
-    def start_camera(self):
-        """启动摄像头"""
-        if self.yolo_predict.source is not None:
-            self.yolo_thread.start()  # 启动线程
-            self.main2yolo_begin_sgl.emit()  # 发送开始信号
+        # 释放摄像头资源
+        if hasattr(self, 'cap') and self.cap.isOpened():
+            self.cap.release()
+
+        # 保存配置
+        self.save_settings()
+
+        # 接受关闭事件
+        event.accept()
+
+    def init_camera(self):
+        """初始化摄像头"""
+        try:
+            _, available_cameras = self.camera_manager.get_cam_num()
+            if available_cameras:
+                self.camera_manager.add_camera(available_cameras[0])
+                self.camera_manager.switch_camera(available_cameras[0])
+                self.show_status(f'摄像头 {available_cameras[0]} 连接成功')
+            else:
+                self.show_status('未检测到可用摄像头')
+        except Exception as e:
+            self.show_status(f'摄像头连接失败: {str(e)}')
+
+    def update_frame(self):
+        """更新摄像头帧到 GUI"""
+        try:
+            ret, frame = self.camera_manager.current_camera.read()
+            if ret:
+                # 将帧转换为 QImage
+                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                h, w, ch = frame.shape
+                bytes_per_line = ch * w
+                q_img = QImage(frame.data, w, h, bytes_per_line, QImage.Format_RGB888)
+                # 更新到 QLabel
+                self.pre_video.setPixmap(QPixmap.fromImage(q_img))
+        except Exception as e:
+            self.show_status(f'帧更新出错: {str(e)}')
+
+
+class YoloDetectionThread(QThread):
+    raw_frame_signal = Signal(QImage)
+    detected_frame_signal = Signal(QImage)
+    
+    def __init__(self, model_path, camera_index=0):
+        super().__init__()
+        self.model_path = model_path
+        self.camera_index = camera_index
+        self.is_running = True
+        
+    def run(self):
+        try:
+            model = YOLO(self.model_path)
+            cap = cv2.VideoCapture(self.camera_index)
+            
+            while self.is_running:
+                ret, frame = cap.read()
+                if ret:
+                    # 发送原始帧a
+                    rgb_image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                    h, w, ch = rgb_image.shape
+                    bytes_per_line = ch * w
+                    q_img = QImage(rgb_image.data, w, h, bytes_per_line, QImage.Format_RGB888)
+                    self.raw_frame_signal.emit(q_img)
+                    
+                    # 进行目标检测
+                    results = model(frame)
+                    annotated_frame = results[0].plot()
+                    
+                    # 发送检测结果帧
+                    rgb_detected = cv2.cvtColor(annotated_frame, cv2.COLOR_BGR2RGB)
+                    q_detected = QImage(rgb_detected.data, w, h, bytes_per_line, QImage.Format_RGB888)
+                    self.detected_frame_signal.emit(q_detected)
+                    
+            cap.release()
+        except Exception as e:
+            print(f"检测出错: {str(e)}")
+            
+    def stop(self):
+        self.is_running = False
+        self.wait()
 
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     Home = MainWindow()
     Home.show()
-    sys.exit(app.exec())  
+    sys.exit(app.exec())

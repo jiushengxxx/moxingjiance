@@ -1,0 +1,6 @@
+{
+  "model": "yolov8n.pt",
+  "iou_thres": 0.45,
+  "conf_thres": 0.25,
+  "speed_thres": 10
+}

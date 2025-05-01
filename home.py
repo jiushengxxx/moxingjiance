@@ -211,11 +211,9 @@ class Ui_MainWindow(object):
 "padding-left: 0px;\n"
 "color: rgba(255, 255, 255, 199);\n"
 "font: 700 12pt \"Nirmala UI\";\n"
-"}\n"
-"\n"
-"QPushButton:hover{\n"
-"background-color: rgba(114, 129, 214, 59);\n"
 "}")
+
+        self.src_cam_button.clicked.connect(self.toggle_camera)
 
         self.verticalLayout_5.addWidget(self.src_cam_button)
 
