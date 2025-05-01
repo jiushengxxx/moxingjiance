@@ -6,18 +6,17 @@ class Camera:
         self.cam_preset_num = cam_preset_num
 
     def get_cam_num(self):
-        cnt = 0
-        devices = []
-        for device in range(0, self.cam_preset_num):
-            stream = cv2.VideoCapture(device, cv2.CAP_DSHOW)
-            grabbed = stream.grab()
-            stream.release()
-            if not grabbed:
-                continue
+        index = 0
+        arr = []
+        while index < 10:  # 最多检测 10 个摄像头
+            cap = cv2.VideoCapture(0, cv2.CAP_MSMF)  # 使用 Media Foundation 后端
+            if not cap.isOpened():
+                break
             else:
-                cnt = cnt + 1
-                devices.append(device)
-        return cnt, devices
+                arr.append(index)
+            cap.release()
+            index += 1
+        return len(arr), arr
 
 
 if __name__ == '__main__':

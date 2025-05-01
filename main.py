@@ -7,7 +7,7 @@ from ultralytics.yolo.utils.files import increment_path
 from ultralytics.yolo.utils.checks import check_imshow
 from ultralytics.yolo.cfg import get_cfg
 from PySide6.QtWidgets import QApplication, QMainWindow, QFileDialog, QMenu
-from PySide6.QtGui import QImage, QPixmap, QColor
+from PySide6.QtGui import QImage, QPixmap, QColor, QAction
 from PySide6.QtCore import QTimer, QThread, Signal, QObject, QPoint, Qt
 from ui.CustomMessageBox import MessageBox
 from ui.home import Ui_MainWindow
@@ -354,7 +354,7 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         
         # Select detection source
         self.src_file_button.clicked.connect(self.open_src_file)  # select local file
-        # self.src_cam_button.clicked.connect(self.show_status("The function has not yet been implemented."))#chose_cam
+        self.src_cam_button.clicked.connect(self.chose_cam)  # 确保摄像头按钮信号已连接
         # self.src_rtsp_button.clicked.connect(self.show_status("The function has not yet been implemented."))#chose_rtsp
 
         # start testing button
@@ -373,30 +373,19 @@ class MainWindow(QMainWindow, Ui_MainWindow):
     # The main window displays the original image and detection results
     @staticmethod
     def show_image(img_src, label):
+        """显示图像"""
         try:
+            if img_src is None:
+                return
+            # 将 OpenCV 图像转换为 QImage
             ih, iw, _ = img_src.shape
-            w = label.geometry().width()
-            h = label.geometry().height()
-            # keep the original data ratio
-            if iw/w > ih/h:
-                scal = w / iw
-                nw = w
-                nh = int(scal * ih)
-                img_src_ = cv2.resize(img_src, (nw, nh))
-
-            else:
-                scal = h / ih
-                nw = int(scal * iw)
-                nh = h
-                img_src_ = cv2.resize(img_src, (nw, nh))
-
-            frame = cv2.cvtColor(img_src_, cv2.COLOR_BGR2RGB)
-            img = QImage(frame.data, frame.shape[1], frame.shape[0], frame.shape[2] * frame.shape[1],
-                         QImage.Format_RGB888)
-            label.setPixmap(QPixmap.fromImage(img))
-
+            qimg = QImage(img_src.data, iw, ih, iw * 3, QImage.Format_BGR888)
+            # 在 QLabel 上显示图像
+            pixmap = QPixmap.fromImage(qimg)
+            label.setPixmap(pixmap)
+            label.setScaledContents(True)
         except Exception as e:
-            print(repr(e))
+            print(f"显示图像时出错：{str(e)}")
 
     # Control start/pause
     def run_or_continue(self):
@@ -463,45 +452,51 @@ class MainWindow(QMainWindow, Ui_MainWindow):
     # Select camera source----  have one bug
     def chose_cam(self):
         try:
-            self.stop()
+            self.stop()  # 停止当前检测任务
             MessageBox(
                 self.close_button, title='Note', text='loading camera...', time=2000, auto=True).exec()
-            # get the number of local cameras
+            # 获取本地摄像头数量
             _, cams = Camera().get_cam_num()
+            if not cams:
+                self.show_status('未检测到可用的摄像头，请检查设备连接。')
+                return
             popMenu = QMenu()
             popMenu.setFixedWidth(self.src_cam_button.width())
             popMenu.setStyleSheet('''
-                                            QMenu {
-                                            font-size: 16px;
-                                            font-family: "Microsoft YaHei UI";
-                                            font-weight: light;
-                                            color:white;
-                                            padding-left: 5px;
-                                            padding-right: 5px;
-                                            padding-top: 4px;
-                                            padding-bottom: 4px;
-                                            border-style: solid;
-                                            border-width: 0px;
-                                            border-color: rgba(255, 255, 255, 255);
-                                            border-radius: 3px;
-                                            background-color: rgba(200, 200, 200,50);}
-                                            ''')
+                QMenu {
+                    font-size: 16px;
+                    font-family: "Microsoft YaHei UI";
+                    font-weight: light;
+                    color: white;
+                    padding-left: 5px;
+                    padding-right: 5px;
+                    padding-top: 4px;
+                    padding-bottom: 4px;
+                    border-style: solid;
+                    border-width: 0px;
+                    border-color: rgba(255, 255, 255, 255);
+                    border-radius: 3px;
+                    background-color: rgba(200, 200, 200, 50);
+                }
+            ''')
 
             for cam in cams:
-                exec("action_%s = QAction('%s')" % (cam, cam))
-                exec("popMenu.addAction(action_%s)" % cam)
+                action = QAction(f"摄像头 {cam}")
+                popMenu.addAction(action)
 
-            x = self.src_cam_button.mapToGlobal(self.src_cam_button.pos()).x()     
-            y = self.src_cam_button.mapToGlobal(self.src_cam_button.pos()).y()     
+            x = self.src_cam_button.mapToGlobal(self.src_cam_button.pos()).x()
+            y = self.src_cam_button.mapToGlobal(self.src_cam_button.pos()).y()
             y = y + self.src_cam_button.frameGeometry().height()
             pos = QPoint(x, y)
             action = popMenu.exec(pos)
             if action:
-                self.yolo_predict.source = action.text()
-                self.show_status('Loading camera：{}'.format(action.text()))
+                cam_index = int(action.text().split()[-1])  # 提取摄像头索引
+                self.yolo_predict.source = cam_index  # 设置摄像头源
+                self.show_status(f'正在加载摄像头：{cam_index}')
+                self.start_camera()  # 启动摄像头
 
         except Exception as e:
-            self.show_status('%s' % e)
+            self.show_status(f'错误：{str(e)}')
 
     # select network source
     def chose_rtsp(self):
@@ -611,24 +606,40 @@ class MainWindow(QMainWindow, Ui_MainWindow):
     # Change detection parameters
     def change_val(self, x, flag):
         if flag == 'iou_spinbox':
-            self.iou_slider.setValue(int(x*100))    # The box value changes, changing the slider
+            self.iou_slider.setValue(int(x * 100))
         elif flag == 'iou_slider':
-            self.iou_spinbox.setValue(x/100)        # The slider value changes, changing the box
-            self.show_status('IOU Threshold: %s' % str(x/100))
-            self.yolo_predict.iou_thres = x/100
+            self.iou_spinbox.setValue(x / 100)
+            self.show_status('IOU Threshold: %s' % str(x / 100))
+            self.yolo_predict.iou_thres = x / 100
         elif flag == 'conf_spinbox':
-            self.conf_slider.setValue(int(x*100))
+            self.conf_slider.setValue(int(x * 100))
         elif flag == 'conf_slider':
-            self.conf_spinbox.setValue(x/100)
-            self.show_status('Conf Threshold: %s' % str(x/100))
-            self.yolo_predict.conf_thres = x/100
+            self.conf_spinbox.setValue(x / 100)
+            self.show_status('Conf Threshold: %s' % str(x / 100))
+            self.yolo_predict.conf_thres = x / 100
         elif flag == 'speed_spinbox':
             self.speed_slider.setValue(x)
+            self.yolo_predict.speed_thres = x
+            # 根据帧率调整延迟
+            if x > 0:
+                delay = 1000 / x
+                self.yolo_predict.speed_thres = int(delay)
         elif flag == 'speed_slider':
             self.speed_spinbox.setValue(x)
             self.show_status('Delay: %s ms' % str(x))
-            self.yolo_predict.speed_thres = x  # ms
-            
+            self.yolo_predict.speed_thres = x
+            # 根据帧率调整延迟
+            if x > 0:
+                delay = 1000 / x
+                self.yolo_predict.speed_thres = int(delay)
+        # 动态调整帧率
+        if self.yolo_predict.speed_thres > 0:
+            frame_rate = 1000 / self.yolo_predict.speed_thres
+            if frame_rate < 15:  # 假设帧率低于15时，适当降低阈值
+                self.yolo_predict.speed_thres = max(1, self.yolo_predict.speed_thres - 1)
+            elif frame_rate > 30:  # 假设帧率高于30时，适当提高阈值
+                self.yolo_predict.speed_thres = self.yolo_predict.speed_thres + 1
+
     # change model
     def change_model(self,x):
         self.select_model = self.model_box.currentText()
@@ -681,15 +692,19 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         config_json = json.dumps(config, ensure_ascii=False, indent=2)
         with open(config_file, 'w', encoding='utf-8') as f:
             f.write(config_json)
-        # Exit the process before closing
         if self.yolo_thread.isRunning():
             self.yolo_predict.stop_dtc = True
             self.yolo_thread.quit()
+            self.yolo_thread.wait()  # 等待线程结束
             MessageBox(
                 self.close_button, title='Note', text='Exiting, please wait...', time=3000, auto=True).exec()
-            sys.exit(0)
-        else:
-            sys.exit(0)
+        sys.exit(0)
+
+    def start_camera(self):
+        """启动摄像头"""
+        if self.yolo_predict.source is not None:
+            self.yolo_thread.start()  # 启动线程
+            self.main2yolo_begin_sgl.emit()  # 发送开始信号
 
 
 if __name__ == "__main__":
